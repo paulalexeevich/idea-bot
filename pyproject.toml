@@ -20,7 +20,7 @@ dependencies = [
     "httpx>=0.27",
     "beautifulsoup4>=4.12",
     "lxml>=5.0",
-    "duckduckgo-search>=6.0",
+    "ddgs>=0.1",
 ]
 
 [project.optional-dependencies]

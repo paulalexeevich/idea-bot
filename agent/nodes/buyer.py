@@ -46,7 +46,7 @@ def _build_query(search_query: str, location_type: str, current_location: str, h
 
 
 def _search_sync(query: str, max_results: int = 10) -> list[Offer]:
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
     offers: list[Offer] = []
     try:
         with DDGS() as ddgs:

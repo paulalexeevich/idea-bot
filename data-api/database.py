@@ -96,6 +96,12 @@ async def init_db() -> None:
             )
         """)
 
+        # Migrate offers table: add location_context column if missing
+        async with db.execute("PRAGMA table_info(offers)") as cur:
+            offer_cols = [row[1] for row in await cur.fetchall()]
+        if offer_cols and "location_context" not in offer_cols:
+            await db.execute("ALTER TABLE offers ADD COLUMN location_context TEXT")
+
         await db.commit()
 
 
