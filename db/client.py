@@ -130,10 +130,16 @@ async def set_setting(key: str, value: str) -> None:
     r.raise_for_status()
 
 
-async def save_offer(task_id: int, title: str, price: str | None, store: str | None, url: str, snippet: str | None = None, location_context: str | None = None) -> None:
+async def update_task_deadline(task_id: int, deadline: str | None, urgency: str | None) -> None:
+    r = await _get().patch(f"/tasks/{task_id}/deadline", json={"deadline": deadline, "urgency": urgency})
+    r.raise_for_status()
+
+
+async def save_offer(task_id: int, title: str, price: str | None, store: str | None, url: str, snippet: str | None = None, location_context: str | None = None, delivery_days_estimate: int | None = None) -> None:
     r = await _get().post(f"/tasks/{task_id}/offers", json={
         "title": title, "price": price, "store": store, "url": url,
         "snippet": snippet, "location_context": location_context,
+        "delivery_days_estimate": delivery_days_estimate,
     })
     r.raise_for_status()
 

@@ -20,6 +20,7 @@ from database import (
     db_set_setting,
     db_set_task_status,
     db_set_task_type,
+    db_update_task_deadline,
     init_db,
 )
 
@@ -64,13 +65,19 @@ class SettingUpdate(BaseModel):
     value: str
 
 
+class DeadlineUpdate(BaseModel):
+    deadline: str | None = None   # ISO date string or null
+    urgency: str | None = None    # asap | fast | week | flexible | any
+
+
 class OfferCreate(BaseModel):
     title: str
     price: str | None = None
     store: str | None = None
     url: str
     snippet: str | None = None
-    location_context: str | None = None  # home | travel | online
+    location_context: str | None = None
+    delivery_days_estimate: int | None = None
 
 
 class DiscoveryCreate(BaseModel):
@@ -165,12 +172,21 @@ async def get_offers(task_id: int):
     return await db_get_offers(task_id)
 
 
+@app.patch("/tasks/{task_id}/deadline", dependencies=[Depends(verify_key)])
+async def update_deadline(task_id: int, body: DeadlineUpdate):
+    task = await db_get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    await db_update_task_deadline(task_id, body.deadline, body.urgency)
+    return {"ok": True}
+
+
 @app.post("/tasks/{task_id}/offers", dependencies=[Depends(verify_key)])
 async def save_offer(task_id: int, body: OfferCreate):
     task = await db_get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
-    offer_id = await db_save_offer(task_id, body.title, body.price, body.store, body.url, body.snippet)
+    offer_id = await db_save_offer(task_id, body.title, body.price, body.store, body.url, body.snippet, body.location_context, body.delivery_days_estimate)
     return {"id": offer_id}
 
 

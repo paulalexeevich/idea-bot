@@ -96,11 +96,21 @@ async def init_db() -> None:
             )
         """)
 
-        # Migrate offers table: add location_context column if missing
+        # Migrate tasks: add deadline + urgency columns if missing
+        async with db.execute("PRAGMA table_info(tasks)") as cur:
+            task_cols = [row[1] for row in await cur.fetchall()]
+        if task_cols and "deadline" not in task_cols:
+            await db.execute("ALTER TABLE tasks ADD COLUMN deadline TEXT")
+        if task_cols and "urgency" not in task_cols:
+            await db.execute("ALTER TABLE tasks ADD COLUMN urgency TEXT")
+
+        # Migrate offers table: add missing columns
         async with db.execute("PRAGMA table_info(offers)") as cur:
             offer_cols = [row[1] for row in await cur.fetchall()]
         if offer_cols and "location_context" not in offer_cols:
             await db.execute("ALTER TABLE offers ADD COLUMN location_context TEXT")
+        if offer_cols and "delivery_days_estimate" not in offer_cols:
+            await db.execute("ALTER TABLE offers ADD COLUMN delivery_days_estimate INTEGER")
 
         await db.commit()
 
@@ -174,11 +184,20 @@ async def db_set_setting(key: str, value: str) -> None:
         await db.commit()
 
 
-async def db_save_offer(task_id: int, title: str, price: str | None, store: str | None, url: str, snippet: str | None, location_context: str | None = None) -> int:
+async def db_update_task_deadline(task_id: int, deadline: str | None, urgency: str | None) -> None:
+    async with get_db() as db:
+        await db.execute(
+            "UPDATE tasks SET deadline = ?, urgency = ? WHERE id = ?",
+            (deadline, urgency, task_id),
+        )
+        await db.commit()
+
+
+async def db_save_offer(task_id: int, title: str, price: str | None, store: str | None, url: str, snippet: str | None, location_context: str | None = None, delivery_days_estimate: int | None = None) -> int:
     async with get_db() as db:
         cursor = await db.execute(
-            "INSERT INTO offers (task_id, title, price, store, url, snippet, location_context) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (task_id, title, price, store, url, snippet, location_context),
+            "INSERT INTO offers (task_id, title, price, store, url, snippet, location_context, delivery_days_estimate) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (task_id, title, price, store, url, snippet, location_context, delivery_days_estimate),
         )
         await db.commit()
         return cursor.lastrowid

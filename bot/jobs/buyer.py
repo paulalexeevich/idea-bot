@@ -18,6 +18,8 @@ async def run_buyer(
     search_query: str,
     location_type: str,
     bot: Bot,
+    strategy: str = "any",
+    deadline_days: int | None = None,
 ) -> None:
     await set_task_status(task_id, "processing")
     try:
@@ -27,7 +29,8 @@ async def run_buyer(
         state = await buyer_graph.ainvoke({
             "task_text": task_text,
             "search_query": search_query,
-            "location_type": location_type,
+            "strategy": strategy,
+            "deadline_days": deadline_days,
             "current_location": current_location,
             "home_location": home_location,
             "offers": [],
@@ -51,6 +54,7 @@ async def run_buyer(
                 url=offer.url,
                 snippet=offer.snippet,
                 location_context=location_type,
+                delivery_days_estimate=offer.delivery_days,
             )
 
         await set_task_status(task_id, "done")
