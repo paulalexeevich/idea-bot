@@ -67,7 +67,7 @@ async def _call_llm(prompt: str) -> str:
         from langchain_google_genai import ChatGoogleGenerativeAI
         from langchain_core.messages import HumanMessage
         llm = ChatGoogleGenerativeAI(
-            model="gemini-3.1-pro-preview",
+            model="gemini-2.0-flash",  # fast + cheap for classification
             google_api_key=settings.google_gemini_api_key,
         )
         response = await llm.ainvoke([HumanMessage(content=prompt)])
