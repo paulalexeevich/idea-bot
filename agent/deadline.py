@@ -82,7 +82,7 @@ async def _call_llm(prompt: str) -> str:
     if settings.llm_provider == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
         llm = ChatGoogleGenerativeAI(
-            model="gemini-3.1-flash-lite-preview",
+            model="gemini-3.1-flash-lite",
             google_api_key=settings.google_gemini_api_key,
         )
     elif settings.llm_provider == "claude":

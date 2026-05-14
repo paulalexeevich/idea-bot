@@ -90,7 +90,7 @@ def _get_llm():
     else:  # gemini (default)
         from langchain_google_genai import ChatGoogleGenerativeAI
         return ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
+            model="gemini-3.1-flash-lite",
             google_api_key=settings.google_gemini_api_key,
         )
 

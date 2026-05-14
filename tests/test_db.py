@@ -1,54 +1,84 @@
+"""Tests for db/client.py — the HTTP client that wraps the data-api."""
 import pytest
-from unittest.mock import patch
+import respx
+import httpx
+from datetime import datetime
+from unittest.mock import patch, MagicMock
 
-from db.database import get_idea_counts, get_recent_ideas, save_idea, set_idea_status
+BASE = "http://data-api-test:8001"
 
 
 @pytest.fixture(autouse=True)
-def use_temp_db(tmp_path):
-    db_file = str(tmp_path / "test.db")
-    with patch("db.database.settings") as mock_settings:
-        mock_settings.db_path = db_file
+def patch_api_url():
+    mock_cfg = MagicMock()
+    mock_cfg.data_api_url = BASE
+    mock_cfg.data_api_key = "test-key"
+    with patch("db.client._client", None), patch("db.client.settings", mock_cfg):
         yield
 
 
 @pytest.mark.asyncio
-async def test_save_and_list_idea():
-    from db.database import init_db
-    await init_db()
-
-    idea_id = await save_idea("AI-powered recipe generator")
-    assert isinstance(idea_id, int)
-    assert idea_id > 0
-
-    ideas = await get_recent_ideas(10)
-    assert len(ideas) == 1
-    assert ideas[0].text == "AI-powered recipe generator"
-    assert ideas[0].status == "pending"
+@respx.mock
+async def test_create_task_returns_id():
+    respx.post(f"{BASE}/tasks").mock(return_value=httpx.Response(200, json={"id": 42}))
+    from db.client import create_task
+    assert await create_task("Build an AI recipe app", type="idea") == 42
 
 
 @pytest.mark.asyncio
-async def test_set_idea_status():
-    from db.database import init_db
-    await init_db()
-
-    idea_id = await save_idea("Some idea")
-    await set_idea_status(idea_id, "done")
-
-    ideas = await get_recent_ideas()
-    assert ideas[0].status == "done"
+@respx.mock
+async def test_get_recent_tasks():
+    payload = [
+        {"id": 1, "text": "Idea A", "type": "idea", "created_at": "2026-03-25T10:00:00", "status": "pending"},
+        {"id": 2, "text": "Buy milk", "type": "shopping", "created_at": "2026-03-26T09:00:00", "status": "done"},
+    ]
+    respx.get(f"{BASE}/tasks").mock(return_value=httpx.Response(200, json=payload))
+    from db.client import get_recent_tasks
+    tasks = await get_recent_tasks(10)
+    assert len(tasks) == 2
+    assert tasks[0].type == "idea"
+    assert tasks[1].status == "done"
 
 
 @pytest.mark.asyncio
-async def test_idea_counts():
-    from db.database import init_db
-    await init_db()
+@respx.mock
+async def test_get_task_by_id_not_found():
+    respx.get(f"{BASE}/tasks/99").mock(return_value=httpx.Response(404, json={"detail": "Not found"}))
+    from db.client import get_task_by_id
+    assert await get_task_by_id(99) is None
 
-    await save_idea("Idea 1")
-    await save_idea("Idea 2")
-    idea_id = (await save_idea("Idea 3"))
-    await set_idea_status(idea_id, "done")
 
-    counts = await get_idea_counts()
-    assert counts["pending"] == 2
-    assert counts["done"] == 1
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_due_reminders():
+    payload = [
+        {"id": 7, "text": "Call dentist", "type": "reminder", "created_at": "2026-05-14T08:00:00",
+         "status": "pending", "due_date": "2026-05-15", "due_time": "09:00"},
+    ]
+    respx.get(f"{BASE}/reminders/due").mock(return_value=httpx.Response(200, json=payload))
+    from db.client import get_due_reminders
+    tasks = await get_due_reminders("2026-05-15T09:01")
+    assert len(tasks) == 1
+    assert tasks[0]["text"] == "Call dentist"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_save_message():
+    respx.post(f"{BASE}/messages").mock(return_value=httpx.Response(200, json={"id": 5}))
+    from db.client import save_message
+    await save_message("user", "hello")  # should not raise
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_get_recent_messages():
+    payload = [
+        {"id": 1, "role": "user", "content": "remind me tomorrow", "created_at": "2026-05-14T10:00:00"},
+        {"id": 2, "role": "bot", "content": "Task #1 saved ✓", "created_at": "2026-05-14T10:00:01"},
+    ]
+    respx.get(f"{BASE}/messages/recent").mock(return_value=httpx.Response(200, json=payload))
+    from db.client import get_recent_messages
+    msgs = await get_recent_messages(20)
+    assert len(msgs) == 2
+    assert msgs[0]["role"] == "user"

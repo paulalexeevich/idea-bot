@@ -74,7 +74,7 @@ async def _call_gemini(prompt: str) -> DiscoveryResult:
     from langchain_google_genai import ChatGoogleGenerativeAI
     from langchain_core.messages import HumanMessage
 
-    llm = ChatGoogleGenerativeAI(model="gemini-3.1-pro-preview", google_api_key=settings.google_gemini_api_key)
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", google_api_key=settings.google_gemini_api_key)
     response = await llm.ainvoke([HumanMessage(content=prompt)])
     return _parse_response(response.content)
 
