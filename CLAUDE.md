@@ -59,7 +59,7 @@ idea-bot/
 ├── bot/
 │   ├── handlers/
 │   │   ├── idea.py             # MessageHandler: save → classify+memory → route
-│   │   └── commands.py         # /list /report /status /debug_run /location /sethome /setlocation
+│   │   └── commands.py         # /list /report /status /debug_run /location /sethome /setlocation /timezone /settimezone /reminders
 │   ├── jobs/
 │   │   ├── discovery.py        # nightly: pending ideas → discovery pipeline → notify
 │   │   ├── buyer.py            # immediate: shopping task → buyer pipeline → notify
@@ -141,6 +141,9 @@ idea-bot/
 | `/location` | Show home + current location |
 | `/setlocation <city>` | Update current location (used for local shopping) |
 | `/sethome <city>` | Update home location |
+| `/timezone` | Show current timezone setting |
+| `/settimezone <tz>` | Set timezone (IANA name, e.g. `Europe/Budapest`); validated + persisted to settings table |
+| `/reminders` | List upcoming pending reminders with local time conversion |
 
 ---
 
@@ -150,7 +153,7 @@ idea-bot/
 - **`db/database.py` is dead code** — old direct-SQLite layer from before the data-api existed. Do not use.
 - **All async** — `httpx.AsyncClient`, `asyncio`. Never `requests` or `time.sleep`.
 - **Instant reply, async classify** — `handle_message` saves the task and replies in ~50ms. Classification + memory query run in `asyncio.create_task`.
-- **Both messages and bot replies are saved** — every user message and every bot reply is written to the `messages` table via `save_message()`. This feeds the memory extraction pipeline.
+- **Both messages and bot replies are saved** — every user message and every bot reply is written to the `messages` table via `save_message()`. This feeds the memory extraction pipeline. This now includes bot replies from all reminder clarification handlers (`_handle_reminder_date_reply`, `_handle_reminder_time_reply`) and the shopping deadline handler (`_handle_deadline_reply`) — previously these handlers replied but never saved to the messages table or triggered Tier 1 extraction (bug fixed).
 - **Single-user guard** — every handler checks `update.effective_user.id == settings.telegram_user_id`.
 - **Jobs via PTB job_queue** — `run_daily` / `run_repeating` registered in `main.py`. No system cron.
 - **Memory agent is optional** — if `MEMORY_AGENT_URL` is empty, the bot works without long-term memory; short-term context (last 20 messages) still flows into classification.

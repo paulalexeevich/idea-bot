@@ -42,8 +42,8 @@ User sends message
       ├─ save_message("user", text)          → messages table, processed=0
       ├─ set_setting("last_user_message_at") → for Tier 2 idle detection
       │
-      ├─ Check AWAITING_REMINDER_TASK_KEY    → _handle_reminder_date/time_reply
-      ├─ Check AWAITING_TASK_KEY             → _handle_deadline_reply (shopping)
+      ├─ Check AWAITING_REMINDER_TASK_KEY    → _handle_reminder_date/time_reply → save_message + POST /memory/process-now (Tier 1)
+      ├─ Check AWAITING_TASK_KEY             → _handle_deadline_reply (shopping) → save_message + POST /memory/process-now (Tier 1)
       │
       └─ create_task(text, type="note")      → instant reply "Task #N saved ✓"
              │
@@ -62,6 +62,9 @@ User sends message
                         ├─ [shopping]     → ask deadline → run_buyer (immediate)
                         ├─ [reminder]     → parse due_date+due_time → update_task_reminder
                         │                   or ask for missing date/time
+                        │                   (date reply: parse_reminder_datetime LLM extracts date+time
+                        │                    together in one call — if user says "tomorrow at 10" both
+                        │                    are resolved immediately with no extra question needed)
                         ├─ [architecture] → save to GitHub issue
                         ├─ [learning]     → save to GitHub issue
                         └─ [todo|note|question|other] → emoji reply
@@ -150,7 +153,8 @@ CREATE TABLE settings (
     -- keys used: home_location, current_location, last_user_message_at,
     --            session_extracted_at, awaiting_task_id, awaiting_search_query,
     --            awaiting_location_type, awaiting_reminder_task_id,
-    --            awaiting_reminder_date, awaiting_reminder_time
+    --            awaiting_reminder_date, awaiting_reminder_time,
+    --            user_timezone
 );
 ```
 
@@ -316,6 +320,7 @@ All require `X-API-Key` header. Base URL: `DATA_API_URL` (default `http://data-a
 |----------|--------|--------|--------|
 | Classification (`classifier.py`) | `gemini-3.1-flash-lite` | `claude-haiku-4-5-20251001` | `gpt-4o-mini` |
 | Deadline parsing (`deadline.py`) | `gemini-3.1-flash-lite` | `claude-sonnet-4-6` | `gpt-4o` |
+| Reminder datetime parsing (`deadline.py:parse_reminder_datetime`) | `gemini-3.1-flash-lite` | `claude-sonnet-4-6` | `gpt-4o` |
 | Task agent (`task_agent.py`) | `gemini-2.5-flash` | `claude-haiku-4-5-20251001` | `gpt-4o-mini` |
 | Memory extraction (`extractor.py`) | `gemini-2.5-flash` | `claude-haiku-4-5-20251001` | `gpt-4o-mini` |
 | Discovery synthesis (`synthesize.py`) | `gemini-2.5-pro` | `claude-sonnet-4-6` | `gpt-4o` |
@@ -334,6 +339,7 @@ Stored as key-value pairs in the `settings` table. Only one two-step flow can be
 | `awaiting_reminder_task_id` | Reminder: date or time still needed |
 | `awaiting_reminder_date` | Reminder: `NEEDED` or stored ISO date |
 | `awaiting_reminder_time` | Reminder: `NEEDED` or stored HH:MM |
+| `user_timezone` | User's IANA timezone name (e.g. `Europe/Budapest`). Default: `UTC`. Used when formatting reminder confirmations and notifications. |
 
 ---
 

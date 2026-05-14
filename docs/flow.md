@@ -25,8 +25,8 @@ flowchart TD
     A([User sends text]) --> B[handle_message]
 
     B --> C{AWAITING state\nin settings?}
-    C -->|awaiting_reminder_task_id| D[_handle_reminder_date_reply\nor _handle_reminder_time_reply]
-    C -->|awaiting_task_id| E[_handle_deadline_reply\n→ run_buyer]
+    C -->|awaiting_reminder_task_id| D[_handle_reminder_date_reply\nor _handle_reminder_time_reply\n→ save_message + process-now]
+    C -->|awaiting_task_id| E[_handle_deadline_reply\n→ run_buyer\n→ save_message + process-now]
     C -->|nothing| F
 
     F[save_message user + text\nset last_user_message_at] --> G
@@ -55,6 +55,8 @@ flowchart TD
     R -->|architecture\nlearning| X[save_to_github\nreply with link]
     R -->|todo note\nquestion other| Y[emoji reply]
 
+    D --> Z
+    E --> Z
     S --> Z
     T --> Z
     V --> Z
@@ -161,6 +163,7 @@ flowchart TD
 
     N --> O[save_offer × N]
     O --> P[Telegram: top 5 with prices and links]
+    P --> Q[save_message bot + reply\nPOST /memory/process-now\n→ Tier 1 extraction]
 ```
 
 ---
@@ -171,7 +174,7 @@ flowchart TD
 flowchart TD
     A[classified: reminder] --> B{due_date\ndue_time\nextracted?}
 
-    B -->|both| SAVE[update_task_reminder\ndue_date + due_time\nreply confirmed]
+    B -->|both present\n'tomorrow at 10'| SAVE[update_task_reminder\ndue_date + due_time\nreply confirmed\n— no extra question]
 
     B -->|only date| C[set AWAITING_REMINDER_TASK_KEY\nset AWAITING_REMINDER_DATE=date\nset AWAITING_REMINDER_TIME=NEEDED\nask for time]
 
@@ -180,13 +183,14 @@ flowchart TD
     B -->|neither| E[set AWAITING states\nask for date and time]
 
     F([Next message]) --> G{which piece\nstill NEEDED?}
-    G -->|date| H[_handle_reminder_date_reply\nparse_deadline LLM]
-    G -->|time| I[_handle_reminder_time_reply\ntime_parser regex]
+    G -->|date| H[_handle_reminder_date_reply\nparse_reminder_datetime LLM\n(extracts date+time together)]
+    G -->|time| I[_handle_reminder_time_reply\nparse_reminder_datetime LLM first\nfallback: time_parser regex]
 
     H --> SAVE
     I --> SAVE
 
-    SAVE --> FIRE
+    SAVE --> SAVEMSG[save_message bot + reply\nPOST /memory/process-now\n→ Tier 1 extraction]
+    SAVEMSG --> FIRE
 
     subgraph FIRE [check_reminders job — every 60s]
         J[GET /reminders/due?now=HH:MM\ndue_date+due_time <= now\nnotified_at IS NULL] --> K
