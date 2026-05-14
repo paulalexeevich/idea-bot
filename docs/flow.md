@@ -29,7 +29,14 @@ flowchart TD
     C -->|awaiting_task_id| E[_handle_deadline_reply\n→ run_buyer\n→ save_message + process-now]
     C -->|nothing| F
 
-    F[save_message user + text\nset last_user_message_at] --> G
+    F[save_message user + text\nset last_user_message_at] --> QR
+
+    QR{_QUERY_RE\nregex matches?}
+    QR -->|yes| QC[classify inline]
+    QC -->|type=query| QH[_handle_query\n→ query_agent.run_query\n→ reply + save_message\n+ process-now / Tier 1]
+    QC -->|other type| G
+    QR -->|no| G
+
     G[create_task type=note\n→ reply 'Task #N saved ✓'\nsave_message bot + reply] --> H
 
     H[asyncio.create_task\n_classify_and_followup] -->|background| I
@@ -54,15 +61,18 @@ flowchart TD
     U -->|neither| W
     R -->|architecture\nlearning| X[save_to_github\nreply with link]
     R -->|todo note\nquestion other| Y[emoji reply]
+    R -->|query\nfallback| QF[_handle_query\n→ query_agent.run_query\n→ reply]
 
     D --> Z
     E --> Z
+    QH --> ZEND([done — early exit\nno task created])
     S --> Z
     T --> Z
     V --> Z
     W --> Z
     X --> Z
     Y --> Z
+    QF --> Z
 
     Z[save_message bot + reply\nPOST /memory/process-now\n→ Tier 1 extraction]
 ```
@@ -269,4 +279,28 @@ flowchart LR
         MA -->|GET /messages/*| EP
         GC --> NEO[(Neo4j)]
     end
+```
+
+---
+
+## 10. Query agent flow
+
+```mermaid
+flowchart TD
+    A([User asks a question]) --> B[_QUERY_RE matches\nclassify inline]
+    B -->|type=query| C[_handle_query]
+    C --> D[query_agent.run_query\nrecent_messages + user_tz]
+
+    subgraph AGENT [Query agent loop — up to 6 rounds]
+        D --> E{LLM decides\nwhich tool}
+        E -->|list_tasks| F[GET /tasks\nfiltered by type+status]
+        E -->|search_tasks| G[GET /tasks/search?q=\nLIKE keyword match]
+        E -->|query_memory| H[Neo4j keyword search\nvia MCP]
+        F & G & H --> I[ToolMessage result\nback to LLM]
+        I --> E
+        E -->|no more tools| J[LLM formats reply]
+    end
+
+    J --> K[reply_text to user]
+    K --> L[save_message bot\nPOST /memory/process-now\nTier 1 extraction]
 ```

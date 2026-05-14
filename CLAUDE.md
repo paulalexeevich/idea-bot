@@ -72,6 +72,7 @@ idea-bot/
 ├── agent/
 │   ├── classifier.py           # structured-output LLM classifier; injects short + long-term memory
 │   ├── task_agent.py           # tool-calling agent: save_reminder/save_task/ask_clarification + MCP memory
+│   ├── query_agent.py          # read-only tool-calling agent for retrieval queries; never saves tasks
 │   ├── time_parser.py          # regex-based HH:MM parser (no LLM needed)
 │   ├── deadline.py             # LLM date parser → DeadlineInfo (for shopping deadlines)
 │   ├── graph.py                # LangGraph discovery pipeline
@@ -157,6 +158,7 @@ idea-bot/
 - **Single-user guard** — every handler checks `update.effective_user.id == settings.telegram_user_id`.
 - **Jobs via PTB job_queue** — `run_daily` / `run_repeating` registered in `main.py`. No system cron.
 - **Memory agent is optional** — if `MEMORY_AGENT_URL` is empty, the bot works without long-term memory; short-term context (last 20 messages) still flows into classification.
+- **Query routing bypasses task creation** — `handle_message` applies `_QUERY_RE` (regex) before the normal save path. If it matches and no AWAITING state is active, the message is classified inline; if the type is `query`, `_handle_query` runs the query agent and returns immediately — no task row is created, no `create_task` call is made. The `query` type is also handled as a fallback in `_classify_and_followup` in case the regex misses it.
 
 ---
 

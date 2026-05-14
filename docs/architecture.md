@@ -45,6 +45,11 @@ User sends message
       ├─ Check AWAITING_REMINDER_TASK_KEY    → _handle_reminder_date/time_reply → save_message + POST /memory/process-now (Tier 1)
       ├─ Check AWAITING_TASK_KEY             → _handle_deadline_reply (shopping) → save_message + POST /memory/process-now (Tier 1)
       │
+      ├─ _QUERY_RE regex matches?            → classify inline → if type=query → _handle_query
+      │        └─ query_agent.run_query      → reply to user
+      │                                        save_message + POST /memory/process-now (Tier 1)
+      │                                        (no task saved — returns here)
+      │
       └─ create_task(text, type="note")      → instant reply "Task #N saved ✓"
              │
              └─ asyncio.create_task(_classify_and_followup)
@@ -67,6 +72,8 @@ User sends message
                         │                    are resolved immediately with no extra question needed)
                         ├─ [architecture] → save to GitHub issue
                         ├─ [learning]     → save to GitHub issue
+                        ├─ [query]        → query_agent.run_query → reply (fallback path;
+                        │                   normally caught by _QUERY_RE before task creation)
                         └─ [todo|note|question|other] → emoji reply
                                    │
                         bot reply → save_message("bot", reply)
@@ -87,6 +94,7 @@ User sends message
 | `learning` | Lesson learned, insight | Save + GitHub issue |
 | `question` | Open question to think through | Save + emoji reply |
 | `note` | Anything else — link, fact, reference | Save + emoji reply (default) |
+| `query` | "show me", "list", "what X do I have", "найди", "покажи" | Query agent fetches + replies; **no task saved** |
 
 ---
 
@@ -244,6 +252,22 @@ The agent loops up to 8 rounds: calls MCP tools for context, then calls exactly 
 
 ---
 
+## Query agent (`agent/query_agent.py`)
+
+A read-only tool-calling agent that answers questions about saved tasks. Triggered from `_handle_query` in `bot/handlers/idea.py` when the pre-check regex `_QUERY_RE` matches and inline classification confirms `type=query`. The agent **never creates or modifies tasks**.
+
+### Tools available to the LLM
+| Tool | Description |
+|------|-------------|
+| `list_tasks(type, status, limit)` | `GET /tasks` filtered by type and/or status |
+| `search_tasks(query, limit)` | `GET /tasks/search?q=` — LIKE keyword match on task text |
+| `query_memory` | MCP: keyword search in Neo4j (if `MEMORY_AGENT_URL` set) |
+| `list_entities` | MCP: browse the knowledge graph (if `MEMORY_AGENT_URL` set) |
+
+The agent loops up to 6 rounds, calling whichever tools the LLM selects, then formats a reply string. `_handle_query` sends this reply to the user, saves the bot message, and triggers Tier 1 extraction — identical to the normal post-reply flow.
+
+---
+
 ## LangGraph pipelines
 
 ### Discovery pipeline (`agent/graph.py`)
@@ -291,6 +315,7 @@ All require `X-API-Key` header. Base URL: `DATA_API_URL` (default `http://data-a
 | GET | `/health` | Liveness (no auth) |
 | POST | `/tasks` | Create task |
 | GET | `/tasks` | List tasks (`status`, `type`, `limit` filters) |
+| GET | `/tasks/search` | Keyword search (`q`, `limit`); LIKE match on task text. Placed before `/{task_id}` to avoid routing conflict. |
 | GET | `/tasks/{id}` | Get task + discovery |
 | PATCH | `/tasks/{id}/status` | Update status |
 | PATCH | `/tasks/{id}/type` | Update type |
