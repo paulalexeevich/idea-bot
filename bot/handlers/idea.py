@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from agent.classifier import classify_task
-from agent.deadline import parse_deadline
+from agent.deadline import parse_deadline, parse_reminder_datetime
 from bot.integrations.github import save_to_github
 from config import settings
 from db.client import (
@@ -44,6 +44,41 @@ AWAITING_LOCATION_KEY = "awaiting_location_type"
 AWAITING_REMINDER_TASK_KEY = "awaiting_reminder_task_id"
 AWAITING_REMINDER_DATE_KEY = "awaiting_reminder_date"
 AWAITING_REMINDER_TIME_KEY = "awaiting_reminder_time"
+USER_TZ_KEY = "user_timezone"
+
+
+async def _get_user_tz() -> str:
+    tz = await get_setting(USER_TZ_KEY)
+    return tz or "UTC"
+
+
+async def _save_and_extract(content: str) -> None:
+    """Save a bot reply to messages DB and trigger Tier 1 memory extraction."""
+    await save_message("bot", content)
+    memory_url = getattr(settings, "memory_agent_url", "")
+    if memory_url:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as hc:
+                await hc.post(f"{memory_url}/memory/process-now")
+        except Exception:
+            pass
+
+
+def _format_reminder_confirm(due_date: str, due_time_utc: str, user_tz: str = "UTC") -> str:
+    """Format reminder confirmation. Shows local time if TZ differs from UTC."""
+    if user_tz == "UTC":
+        return f"Reminder set for *{due_date}* at *{due_time_utc}* UTC."
+    try:
+        from zoneinfo import ZoneInfo
+        dt_utc = datetime.strptime(f"{due_date} {due_time_utc}", "%Y-%m-%d %H:%M").replace(
+            tzinfo=ZoneInfo("UTC")
+        )
+        dt_local = dt_utc.astimezone(ZoneInfo(user_tz))
+        local_str = dt_local.strftime("%H:%M")
+        tz_label = dt_local.strftime("%Z")
+        return f"Reminder set for *{due_date}* at *{local_str}* {tz_label} (*{due_time_utc}* UTC)."
+    except Exception:
+        return f"Reminder set for *{due_date}* at *{due_time_utc}* UTC."
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -54,7 +89,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not text:
         return
 
-    # Persist user message + track timestamp for Tier 2 idle detection
     now_iso = datetime.now(timezone.utc).isoformat()
     asyncio.create_task(save_message("user", text))
     asyncio.create_task(set_setting("last_user_message_at", now_iso))
@@ -71,31 +105,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await _handle_reminder_time_reply(int(awaiting_reminder), text, update)
             return
 
-    # Check if we're waiting for a deadline reply for a shopping task
+    # Check if awaiting deadline reply for a shopping task
     awaiting = await get_setting(AWAITING_TASK_KEY)
     if awaiting:
         await _handle_deadline_reply(int(awaiting), text, update)
         return
 
-    # Save immediately with default type, reply at once
+    # New message: save immediately, reply, classify in background
     task_id = await create_task(text, type="note")
     reply = f"Task #{task_id} saved ✓"
     await update.message.reply_text(reply)
     asyncio.create_task(save_message("bot", reply))
 
-    # Load short-term memory (last 20 exchanges) for classification context
     try:
         recent = await get_recent_messages(limit=20)
     except Exception:
         recent = []
 
-    # Classify in background — no await
     asyncio.create_task(_classify_and_followup(task_id, text, update, recent))
 
 
 async def _handle_deadline_reply(task_id: int, text: str, update: Update) -> None:
     try:
-        # Clear the awaiting state first
         await set_setting(AWAITING_TASK_KEY, "")
         search_query = await get_setting(AWAITING_QUERY_KEY) or ""
         location_type = await get_setting(AWAITING_LOCATION_KEY) or "any"
@@ -107,11 +138,15 @@ async def _handle_deadline_reply(task_id: int, text: str, update: Update) -> Non
             deadline_info.strategy,
         )
 
-        loc_hint = {"local": "📍 local stores", "online": "🌐 online", "any": "🔍 all sources"}.get(location_type, "")
-        await update.message.reply_text(
-            f"🗓 Deadline: *{deadline_info.label}* → strategy: `{deadline_info.strategy}`\nSearching {loc_hint}…",
-            parse_mode="Markdown",
+        loc_hint = {"local": "📍 local stores", "online": "🌐 online", "any": "🔍 all sources"}.get(
+            location_type, ""
         )
+        msg = (
+            f"🗓 Deadline: *{deadline_info.label}* → strategy: `{deadline_info.strategy}`\n"
+            f"Searching {loc_hint}…"
+        )
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        asyncio.create_task(_save_and_extract(msg))
 
         from db.client import get_task_by_id
         task = await get_task_by_id(task_id)
@@ -127,7 +162,9 @@ async def _handle_deadline_reply(task_id: int, text: str, update: Update) -> Non
         )
     except Exception as e:
         logger.warning("Deadline reply handling failed for task #%d: %s", task_id, e)
-        await update.message.reply_text("Something went wrong parsing the deadline. Searching anyway…")
+        err_msg = "Something went wrong parsing the deadline. Searching anyway…"
+        await update.message.reply_text(err_msg)
+        asyncio.create_task(_save_and_extract(err_msg))
         from db.client import get_task_by_id
         task = await get_task_by_id(task_id)
         search_query = await get_setting(AWAITING_QUERY_KEY) or (task.text if task else "")
@@ -143,65 +180,77 @@ async def _handle_deadline_reply(task_id: int, text: str, update: Update) -> Non
 
 
 async def _handle_reminder_date_reply(task_id: int, text: str, update: Update) -> None:
-    """User was asked for a date; parse it and check if time also needed."""
-    from agent.deadline import parse_deadline
+    """User was asked for a date. Try to extract date and time together."""
     await set_setting(AWAITING_REMINDER_DATE_KEY, "")
-    deadline_info = await parse_deadline(text)
+    user_tz = await _get_user_tz()
+    dt = await parse_reminder_datetime(text, user_tz)
     stored_time = await get_setting(AWAITING_REMINDER_TIME_KEY)
 
-    if deadline_info.date:
-        due_date = deadline_info.date.isoformat()
-        if stored_time and stored_time not in ("NEEDED", ""):
-            await set_setting(AWAITING_REMINDER_TASK_KEY, "")
-            await set_setting(AWAITING_REMINDER_TIME_KEY, "")
-            await update_task_reminder(task_id, due_date, stored_time)
-            await update.message.reply_text(
-                f"Reminder set for *{due_date}* at *{stored_time}* UTC.",
-                parse_mode="Markdown",
-            )
-        else:
-            await set_setting(AWAITING_REMINDER_DATE_KEY, due_date)
-            await set_setting(AWAITING_REMINDER_TIME_KEY, "NEEDED")
-            await update.message.reply_text(
-                f"Got it — *{deadline_info.label}*. At what time? _(e.g. 09:00, 3pm, 18:30)_",
-                parse_mode="Markdown",
-            )
+    # Use the freshly parsed time, or fall back to previously stored time
+    resolved_time = dt.due_time or (
+        stored_time if stored_time and stored_time not in ("NEEDED", "") else None
+    )
+
+    if dt.due_date and resolved_time:
+        await set_setting(AWAITING_REMINDER_TASK_KEY, "")
+        await set_setting(AWAITING_REMINDER_TIME_KEY, "")
+        await update_task_reminder(task_id, dt.due_date, resolved_time)
+        msg = _format_reminder_confirm(dt.due_date, resolved_time, user_tz)
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        asyncio.create_task(_save_and_extract(msg))
+    elif dt.due_date:
+        await set_setting(AWAITING_REMINDER_DATE_KEY, dt.due_date)
+        await set_setting(AWAITING_REMINDER_TIME_KEY, "NEEDED")
+        msg = f"Got it — *{dt.label}*. At what time? _(e.g. 09:00, 3pm, 18:30)_"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        asyncio.create_task(_save_and_extract(msg))
+    elif dt.due_time:
+        # User gave time instead of date — store it, ask for date
+        await set_setting(AWAITING_REMINDER_TIME_KEY, dt.due_time)
+        await set_setting(AWAITING_REMINDER_DATE_KEY, "NEEDED")
+        msg = f"Got *{dt.due_time}* UTC. What date? _(e.g. today, tomorrow, Apr 5)_"
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        asyncio.create_task(_save_and_extract(msg))
     else:
-        await update.message.reply_text(
-            "Couldn't parse that date. Try: *tomorrow*, *Apr 5*, *2026-04-10*.",
-            parse_mode="Markdown",
-        )
+        msg = "Couldn't parse that date. Try: *tomorrow*, *Apr 5*, *2026-04-10*."
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        asyncio.create_task(_save_and_extract(msg))
         await set_setting(AWAITING_REMINDER_DATE_KEY, "NEEDED")
 
 
 async def _handle_reminder_time_reply(task_id: int, text: str, update: Update) -> None:
-    """User was asked for a time; parse it and finalize or ask for date."""
-    from agent.time_parser import parse_time
+    """User was asked for a time. Use LLM parser to handle timezone-qualified times."""
     await set_setting(AWAITING_REMINDER_TIME_KEY, "")
     stored_date = await get_setting(AWAITING_REMINDER_DATE_KEY)
-    due_time = parse_time(text)
+    user_tz = await _get_user_tz()
+
+    # Try LLM-based parsing first (handles "10am Budapest", "в 10", etc.)
+    dt = await parse_reminder_datetime(text, user_tz)
+    due_time = dt.due_time
+
+    # Fall back to fast regex parser for plain times like "10:00", "3pm"
+    if not due_time:
+        from agent.time_parser import parse_time
+        due_time = parse_time(text)
 
     if due_time:
         if stored_date and stored_date not in ("NEEDED", ""):
             await set_setting(AWAITING_REMINDER_TASK_KEY, "")
             await set_setting(AWAITING_REMINDER_DATE_KEY, "")
             await update_task_reminder(task_id, stored_date, due_time)
-            await update.message.reply_text(
-                f"Reminder set for *{stored_date}* at *{due_time}* UTC.",
-                parse_mode="Markdown",
-            )
+            msg = _format_reminder_confirm(stored_date, due_time, user_tz)
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            asyncio.create_task(_save_and_extract(msg))
         else:
             await set_setting(AWAITING_REMINDER_TIME_KEY, due_time)
             await set_setting(AWAITING_REMINDER_DATE_KEY, "NEEDED")
-            await update.message.reply_text(
-                f"Got *{due_time}* UTC. What date? _(e.g. today, tomorrow, Apr 5)_",
-                parse_mode="Markdown",
-            )
+            msg = f"Got *{due_time}* UTC. What date? _(e.g. today, tomorrow, Apr 5)_"
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            asyncio.create_task(_save_and_extract(msg))
     else:
-        await update.message.reply_text(
-            "Couldn't parse that time. Try: *09:00*, *3pm*, *18:30*.",
-            parse_mode="Markdown",
-        )
+        msg = "Couldn't parse that time. Try: *09:00*, *3pm*, *18:30*."
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        asyncio.create_task(_save_and_extract(msg))
         await set_setting(AWAITING_REMINDER_TIME_KEY, "NEEDED")
 
 
@@ -209,7 +258,6 @@ async def _classify_and_followup(
     task_id: int, text: str, update: Update, context: list[dict] | None = None
 ) -> None:
     try:
-        # Fetch long-term memory context via MCP query_memory tool
         long_term_context: str | None = None
         memory_url = getattr(settings, "memory_agent_url", "")
         if memory_url:
@@ -228,29 +276,23 @@ async def _classify_and_followup(
             except Exception as e:
                 logger.debug("MCP memory query skipped: %s", e)
 
-        classification = await classify_task(text, context=context, long_term_context=long_term_context)
+        user_tz = await _get_user_tz()
+        classification = await classify_task(
+            text, context=context, long_term_context=long_term_context, user_tz=user_tz
+        )
         await set_task_type(task_id, classification.type)
 
         async def _reply(msg: str) -> None:
             await update.message.reply_text(msg, parse_mode="Markdown")
-            asyncio.create_task(_save_and_extract("bot", msg))
-
-        async def _save_and_extract(role: str, content: str) -> None:
-            """Save message then immediately trigger Tier 1 extraction."""
-            await save_message(role, content)
-            memory_url = getattr(settings, "memory_agent_url", "")
-            if memory_url:
-                try:
-                    async with httpx.AsyncClient(timeout=5.0) as hc:
-                        await hc.post(f"{memory_url}/memory/process-now")
-                except Exception:
-                    pass
+            asyncio.create_task(_save_and_extract(msg))
 
         emoji = _TYPE_EMOJI.get(classification.type, "•")
         lines = [f"→ {emoji} *{classification.type}*"]
 
         if classification.type in _DISCOVERY_TYPES:
-            lines.append(f"Discovery runs tonight at {settings.discovery_hour:02d}:{settings.discovery_minute:02d} UTC.")
+            lines.append(
+                f"Discovery runs tonight at {settings.discovery_hour:02d}:{settings.discovery_minute:02d} UTC."
+            )
 
         if classification.type in _BUYER_TYPES:
             search_query = classification.search_query or text
@@ -268,7 +310,7 @@ async def _classify_and_followup(
 
             if due_date and due_time:
                 await update_task_reminder(task_id, due_date, due_time)
-                lines.append(f"Reminder set for *{due_date}* at *{due_time}* UTC.")
+                lines.append(_format_reminder_confirm(due_date, due_time, user_tz))
                 await _reply("\n".join(lines))
             elif due_date and not due_time:
                 await set_setting(AWAITING_REMINDER_TASK_KEY, str(task_id))

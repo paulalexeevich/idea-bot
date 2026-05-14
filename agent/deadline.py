@@ -17,6 +17,56 @@ class DeadlineInfo:
     strategy: str               # asap | fast | week | flexible | any
 
 
+@dataclass
+class ReminderDatetime:
+    due_date: str | None   # YYYY-MM-DD or None
+    due_time: str | None   # HH:MM UTC or None
+    label: str             # human-readable
+
+
+async def parse_reminder_datetime(text: str, user_tz: str = "UTC") -> ReminderDatetime:
+    """Extract date and time from a reminder reply. Converts local time to UTC."""
+    today = datetime.now(timezone.utc).date()
+    prompt = f"""Today is {today.isoformat()} ({today.strftime('%A')}). User's timezone: {user_tz}.
+
+Parse this reminder scheduling text. The user may write in any language including Russian.
+
+Text: "{text}"
+
+Extract the intended date and time. If the user specifies a local time (not UTC),
+convert it to UTC using their timezone.
+
+Examples with user timezone Europe/Budapest (UTC+2 in summer, UTC+1 in winter):
+- "tomorrow at 10" → date=tomorrow, time=10:00 local → 08:00 UTC
+- "завтра в 10" (Russian: tomorrow at 10) → date=tomorrow, time=08:00 UTC
+- "в 10" (Russian: at 10) → time=08:00 UTC
+- "April 5" → date=2026-04-05, time=null
+- "14:30" → time=14:30 local → 12:30 UTC
+- "10:00" alone when asked for time → time=10:00 local → convert to UTC
+
+Respond with JSON only, no markdown:
+{{"due_date": "YYYY-MM-DD or null", "due_time": "HH:MM UTC or null", "label": "brief human-readable in original language"}}"""
+
+    try:
+        content = await _call_llm(prompt)
+        text_r = content.strip()
+        if "```" in text_r:
+            text_r = text_r.split("```")[1]
+            if text_r.startswith("json"):
+                text_r = text_r[4:]
+        data = json.loads(text_r.strip())
+        due_date = data.get("due_date")
+        due_time = data.get("due_time")
+        return ReminderDatetime(
+            due_date=due_date if due_date and due_date != "null" else None,
+            due_time=due_time if due_time and due_time != "null" else None,
+            label=data.get("label", text[:40]),
+        )
+    except Exception as e:
+        logger.warning("Reminder datetime parse failed: %s", e)
+        return ReminderDatetime(due_date=None, due_time=None, label=text[:40])
+
+
 def _strategy_from_days(days: int | None) -> str:
     if days is None:
         return "any"

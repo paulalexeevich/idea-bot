@@ -4,7 +4,7 @@ from datetime import time, timezone
 
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 
-from bot.handlers.commands import cmd_debug_run, cmd_list, cmd_location, cmd_report, cmd_sethome, cmd_setlocation, cmd_status
+from bot.handlers.commands import cmd_debug_run, cmd_list, cmd_location, cmd_reminders, cmd_report, cmd_sethome, cmd_setlocation, cmd_settimezone, cmd_status, cmd_timezone
 from bot.handlers.idea import handle_message
 from bot.jobs.discovery import run_discovery
 from bot.jobs.memory import check_session_idle, daily_reflection
@@ -43,6 +43,9 @@ def main() -> None:
     app.add_handler(CommandHandler("location", cmd_location))
     app.add_handler(CommandHandler("setlocation", cmd_setlocation))
     app.add_handler(CommandHandler("sethome", cmd_sethome))
+    app.add_handler(CommandHandler("timezone", cmd_timezone))
+    app.add_handler(CommandHandler("settimezone", cmd_settimezone))
+    app.add_handler(CommandHandler("reminders", cmd_reminders))
 
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 

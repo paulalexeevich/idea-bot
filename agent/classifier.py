@@ -28,6 +28,9 @@ TASK_TYPES = {
 
 _SYSTEM = """You are a task classifier. Classify the user's message and extract all structured information.
 
+Today is {today}. User's local timezone: {user_tz}.
+Always output due_time in UTC 24h HH:MM, converting from the user's local timezone when needed.
+
 Task types:
 - reminder: user wants to be notified at a specific time ("remind me", "alert me at 3pm", "don't forget to call")
 - shopping: find or buy a product
@@ -48,9 +51,7 @@ Examples:
 
 Always extract:
 - due_date: ISO date YYYY-MM-DD if explicitly mentioned, else empty string
-- due_time: 24-hour HH:MM if a time is mentioned ("3 pm" → "15:00", "22:27 pm" → "22:27"), else empty string
-
-Today is {today}.
+- due_time: 24-hour HH:MM UTC if a time is mentioned ("3 pm" → "15:00" then convert to UTC), else empty string
 
 {context_section}"""
 
@@ -99,6 +100,7 @@ async def classify_task(
     text: str,
     context: list[dict] | None = None,
     long_term_context: str | None = None,
+    user_tz: str = "UTC",
 ) -> TaskClassification:
     """
     Classify a task with optional memory injection.
@@ -121,7 +123,7 @@ async def classify_task(
 
         llm = _get_llm().with_structured_output(_ClassifyOutput)
         messages = [
-            SystemMessage(content=_SYSTEM.format(today=today, context_section=context_section)),
+            SystemMessage(content=_SYSTEM.format(today=today, user_tz=user_tz, context_section=context_section)),
             HumanMessage(content=text),
         ]
         data: _ClassifyOutput = await llm.ainvoke(messages)

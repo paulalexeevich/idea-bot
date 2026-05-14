@@ -8,6 +8,8 @@ from config import settings
 from db.client import get_discovery_for_task, get_recent_tasks, get_setting, get_task_by_id, get_task_counts, set_setting
 from bot.jobs.buyer import HOME_KEY, CURRENT_KEY
 
+USER_TZ_KEY = "user_timezone"
+
 _STATUS_EMOJI = {"pending": "⏳", "processing": "🔄", "done": "✅", "error": "❌"}
 _TYPE_EMOJI = {"idea": "💡", "todo": "📋", "note": "📝"}
 
@@ -138,3 +140,72 @@ async def cmd_debug_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     from bot.jobs.discovery import run_discovery
     await update.message.reply_text("Starting discovery run now...")
     await run_discovery(context)
+
+
+async def cmd_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _guard(update):
+        return
+    tz = await get_setting(USER_TZ_KEY) or "UTC"
+    await update.message.reply_text(
+        f"🕐 Your timezone: *{tz}*\n\nUse `/settimezone Europe/Budapest` to change.\n"
+        "Use IANA names: Europe/Budapest, America/New_York, Asia/Tokyo, UTC",
+        parse_mode="Markdown",
+    )
+
+
+async def cmd_settimezone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _guard(update):
+        return
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /settimezone <timezone>\n"
+            "Examples: `/settimezone Europe/Budapest` · `/settimezone UTC`",
+            parse_mode="Markdown",
+        )
+        return
+    tz = " ".join(context.args)
+    try:
+        from zoneinfo import ZoneInfo
+        ZoneInfo(tz)
+    except Exception:
+        await update.message.reply_text(
+            f"❌ Unknown timezone `{tz}`.\n"
+            "Use IANA names like `Europe/Budapest`, `America/New_York`, `Asia/Tokyo`, or `UTC`.",
+            parse_mode="Markdown",
+        )
+        return
+    await set_setting(USER_TZ_KEY, tz)
+    await update.message.reply_text(f"🕐 Timezone set to *{tz}*", parse_mode="Markdown")
+
+
+async def cmd_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _guard(update):
+        return
+    from db.client import get_upcoming_reminders
+    from zoneinfo import ZoneInfo
+
+    user_tz = await get_setting(USER_TZ_KEY) or "UTC"
+    reminders = await get_upcoming_reminders()
+
+    if not reminders:
+        await update.message.reply_text("No upcoming reminders.")
+        return
+
+    lines = []
+    for t in reminders:
+        due_date = t.due_date or "?"
+        due_time = t.due_time or "?"
+        local_str = ""
+        if t.due_date and t.due_time and user_tz != "UTC":
+            try:
+                from datetime import datetime
+                dt_utc = datetime.strptime(f"{t.due_date} {t.due_time}", "%Y-%m-%d %H:%M").replace(
+                    tzinfo=ZoneInfo("UTC")
+                )
+                dt_local = dt_utc.astimezone(ZoneInfo(user_tz))
+                local_str = f" ({dt_local.strftime('%H:%M')} {dt_local.strftime('%Z')})"
+            except Exception:
+                pass
+        lines.append(f"⏰ #{t.id} — {due_date} {due_time} UTC{local_str}\n   {t.text[:60]}")
+
+    await update.message.reply_text("\n\n".join(lines))
