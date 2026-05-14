@@ -64,6 +64,12 @@ async def get_recent_tasks(limit: int = 10) -> list[Task]:
     return [_to_task(d) for d in r.json()]
 
 
+async def search_tasks(query: str, limit: int = 20) -> list[Task]:
+    r = await _get().get("/tasks/search", params={"q": query, "limit": limit})
+    r.raise_for_status()
+    return [_to_task(d) for d in r.json()]
+
+
 async def get_upcoming_reminders(limit: int = 10) -> list[Task]:
     r = await _get().get("/tasks", params={"type": "reminder", "status": "pending", "limit": limit})
     r.raise_for_status()

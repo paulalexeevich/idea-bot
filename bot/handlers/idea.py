@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 from datetime import datetime, timezone
 
 import httpx
@@ -45,6 +46,15 @@ AWAITING_REMINDER_TASK_KEY = "awaiting_reminder_task_id"
 AWAITING_REMINDER_DATE_KEY = "awaiting_reminder_date"
 AWAITING_REMINDER_TIME_KEY = "awaiting_reminder_time"
 USER_TZ_KEY = "user_timezone"
+
+# Heuristic: messages that might be queries. If matched, we classify inline
+# (before saving a task) so we can route to the query agent without saving noise.
+_QUERY_RE = re.compile(
+    r"\b(show|list|what|which|find|search|do i have|how many|give me|"
+    r"покажи|список|какие|сколько|найди|что у меня|есть ли|какой|"
+    r"у меня есть|расскажи)\b",
+    re.IGNORECASE,
+)
 
 
 async def _get_user_tz() -> str:
@@ -92,6 +102,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     now_iso = datetime.now(timezone.utc).isoformat()
     asyncio.create_task(save_message("user", text))
     asyncio.create_task(set_setting("last_user_message_at", now_iso))
+
+    # Fast query pre-check: if the message looks like a retrieval question,
+    # classify inline first so we can skip task creation and reply directly.
+    if _QUERY_RE.search(text) and not await get_setting(AWAITING_REMINDER_TASK_KEY) and not await get_setting(AWAITING_TASK_KEY):
+        user_tz = await _get_user_tz()
+        try:
+            recent = await get_recent_messages(limit=20)
+        except Exception:
+            recent = []
+        classification = await classify_task(text, context=recent, user_tz=user_tz)
+        if classification.type == "query":
+            await _handle_query(text, update, recent, user_tz)
+            return
 
     # Check if awaiting reminder clarification
     awaiting_reminder = await get_setting(AWAITING_REMINDER_TASK_KEY)
@@ -254,6 +277,20 @@ async def _handle_reminder_time_reply(task_id: int, text: str, update: Update) -
         await set_setting(AWAITING_REMINDER_TIME_KEY, "NEEDED")
 
 
+async def _handle_query(
+    text: str, update: Update, recent: list[dict], user_tz: str
+) -> None:
+    """Run the query agent and reply directly. No task is saved."""
+    from agent.query_agent import run_query
+    try:
+        reply = await run_query(text, recent_messages=recent, user_tz=user_tz)
+    except Exception as e:
+        logger.warning("Query agent failed: %s", e)
+        reply = "Sorry, I couldn't retrieve that information right now."
+    await update.message.reply_text(reply)
+    asyncio.create_task(_save_and_extract(reply))
+
+
 async def _classify_and_followup(
     task_id: int, text: str, update: Update, context: list[dict] | None = None
 ) -> None:
@@ -330,6 +367,11 @@ async def _classify_and_followup(
                 await set_setting(AWAITING_REMINDER_TIME_KEY, "NEEDED")
                 lines.append("When should I remind you? _(e.g. tomorrow at 9am, Apr 5 18:00)_")
                 await _reply("\n".join(lines))
+            return
+
+        if classification.type == "query":
+            user_tz = await _get_user_tz()
+            await _handle_query(text, update, context or [], user_tz)
             return
 
         if classification.type in _GITHUB_TYPES:

@@ -315,6 +315,17 @@ async def db_mark_notified(task_id: int, notified_at: str) -> None:
         await db.commit()
 
 
+async def db_search_tasks(query: str, limit: int = 20) -> list[dict]:
+    """Keyword search across task text (case-insensitive LIKE)."""
+    pattern = f"%{query}%"
+    async with get_db() as db:
+        async with db.execute(
+            "SELECT * FROM tasks WHERE text LIKE ? ORDER BY id DESC LIMIT ?",
+            (pattern, limit),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+
 async def db_get_newly_done_tasks() -> list[dict]:
     """Tasks recently marked done but not yet notified (excludes reminder type)."""
     async with get_db() as db:

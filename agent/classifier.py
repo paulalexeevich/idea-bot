@@ -24,6 +24,7 @@ TASK_TYPES = {
     "question":     "open question to research or think through",
     "shopping":     "request to find and compare buying options for a product or item",
     "reminder":     "time-based alert — user wants to be notified at a specific date/time",
+    "query":        "user is asking about their saved data — wants to retrieve, list, or search existing tasks/notes/ideas/reminders",
 }
 
 _SYSTEM = """You are a task classifier. Classify the user's message and extract all structured information.
@@ -32,6 +33,7 @@ Today is {today}. User's local timezone: {user_tz}.
 Always output due_time in UTC 24h HH:MM, converting from the user's local timezone when needed.
 
 Task types:
+- query: user is asking to retrieve or list their saved data ("show me", "list", "what ideas", "do I have", "find", "search", "какие", "покажи", "найди", "сколько")
 - reminder: user wants to be notified at a specific time ("remind me", "alert me at 3pm", "don't forget to call")
 - shopping: find or buy a product
 - idea: startup or product concept to validate
@@ -42,6 +44,11 @@ Task types:
 - note: anything else — link, fact, reference (default)
 
 Examples:
+- "Show me my ideas" → type=query
+- "What reminders do I have?" → type=query
+- "Какие идеи у меня записаны?" → type=query
+- "Покажи мои задачи" → type=query
+- "Find notes about Dubai" → type=query
 - "Remind me to call Olga at 22:27 pm" → type=reminder, due_time=22:27 (it's already 24h, drop the pm)
 - "Set alarm for 3 pm meeting" → type=reminder, due_time=15:00
 - "Don't forget dentist tomorrow 9am" → type=reminder, due_date=<tomorrow>, due_time=09:00
@@ -57,7 +64,7 @@ Always extract:
 
 
 class _ClassifyOutput(BaseModel):
-    type: Literal["idea", "todo", "note", "learning", "architecture", "question", "shopping", "reminder"]
+    type: Literal["idea", "todo", "note", "learning", "architecture", "question", "shopping", "reminder", "query"]
     title: str = Field(description="Concise version of the message, max 60 chars")
     reason: str = Field(description="One sentence explaining why this type was chosen")
     due_date: str = Field(default="", description="ISO date YYYY-MM-DD if mentioned, else empty string")

@@ -25,6 +25,7 @@ from database import (
     db_save_discovery,
     db_save_message,
     db_save_offer,
+    db_search_tasks,
     db_set_setting,
     db_set_task_status,
     db_set_task_type,
@@ -142,6 +143,12 @@ async def create_task(body: TaskCreate):
 async def list_tasks(status: str | None = None, type: str | None = None, limit: int = 50):
     tasks = await db_get_tasks(status=status, type=type, limit=limit)
     return tasks
+
+
+@app.get("/tasks/search", dependencies=[Depends(verify_key)])
+async def search_tasks(q: str, limit: int = 20):
+    """Keyword search in task text. q is matched case-insensitively."""
+    return await db_search_tasks(q, limit)
 
 
 @app.get("/tasks/done/new", dependencies=[Depends(verify_key)])
