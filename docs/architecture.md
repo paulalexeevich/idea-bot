@@ -39,62 +39,63 @@ Every incoming Telegram message follows this path:
 ```
 User sends message
       │
-      ├─ save_message("user", text)          → messages table, processed=0
-      ├─ set_setting("last_user_message_at") → for Tier 2 idle detection
+      ├─ save_message("user", text)          → messages table, processed=0  (async)
+      ├─ set_setting("last_user_message_at") → for Tier 2 idle detection    (async)
       │
       ├─ Check AWAITING_REMINDER_TASK_KEY    → _handle_reminder_date/time_reply → save_message + POST /memory/process-now (Tier 1)
       ├─ Check AWAITING_TASK_KEY             → _handle_deadline_reply (shopping) → save_message + POST /memory/process-now (Tier 1)
       │
-      ├─ _QUERY_RE regex matches?            → classify inline → if type=query → _handle_query
-      │        └─ query_agent.run_query      → reply to user
-      │                                        save_message + POST /memory/process-now (Tier 1)
-      │                                        (no task saved — returns here)
-      │
-      └─ create_task(text, type="note")      → instant reply "Task #N saved ✓"
+      └─ [no AWAITING state]
              │
-             └─ asyncio.create_task(_classify_and_followup)
+             ├─ send typing chat action
+             ├─ get_recent_messages(20)        short-term context
+             │
+             └─ run_unified_agent(text, recent, user_tz)   ← agent/unified_agent.py
                         │
-                        ├─ get_recent_messages(20)           short-term context
-                        ├─ MCP query_memory(text)            long-term context (Neo4j)
+                        │  Opens MCP connection once (if MEMORY_AGENT_URL set)
+                        │  Runs tool-calling loop, up to 10 rounds:
                         │
-                        ├─ classify_task(text, context, long_term_context)
-                        │         structured output: type, title, due_date, due_time,
-                        │         search_query, location
-                        │
-                        ├─ set_task_type(task_id, type)
-                        │
-                        ├─ [idea]         → queue for nightly discovery
-                        ├─ [shopping]     → ask deadline → run_buyer (immediate)
-                        ├─ [reminder]     → parse due_date+due_time → update_task_reminder
-                        │                   or ask for missing date/time
-                        │                   (date reply: parse_reminder_datetime LLM extracts date+time
-                        │                    together in one call — if user says "tomorrow at 10" both
-                        │                    are resolved immediately with no extra question needed)
-                        ├─ [architecture] → save to GitHub issue
-                        ├─ [learning]     → save to GitHub issue
-                        ├─ [query]        → query_agent.run_query → reply (fallback path;
-                        │                   normally caught by _QUERY_RE before task creation)
-                        └─ [todo|note|question|other] → emoji reply
+                        ├─ list_tasks(type, status, limit)    → GET /tasks filtered
+                        ├─ search_tasks(query, limit)         → GET /tasks/search keyword
+                        ├─ query_memory(query)                → MCP: Neo4j keyword search
+                        ├─ save_memory(fact)                  → MCP: persist new fact
+                        ├─ list_entities(entity_type?)        → MCP: browse knowledge graph
+                        ├─ save_reminder(text, title,         → POST /tasks type=reminder
+                        │     due_date, due_time)               PATCH /reminder
+                        │                                        set AWAITING if date/time missing
+                        ├─ save_task(text, title, type)       → POST /tasks any type
+                        └─ ask_clarification(question)        → terminal: returns question as reply
                                    │
-                        bot reply → save_message("bot", reply)
-                                  → POST /memory/process-now   (Tier 1)
+                        LLM writes final reply
+                                   │
+                        AgentResult(reply, task_id, task_type, awaiting)
+                                   │
+                        ├─ reply_text → send to Telegram
+                        ├─ save_message("bot", reply)
+                        ├─ POST /memory/process-now           (Tier 1)
+                        ├─ set awaiting keys (if partial reminder)
+                        └─ _save_to_github_bg (if architecture/learning)
 ```
 
 ---
 
-## Message routing — task types
+## Task types
 
-| Type | Trigger rules | Action |
-|------|--------------|--------|
-| `reminder` | "remind me", "alert at", "don't forget" + time/date | Set due_date + due_time; ask for missing piece |
-| `shopping` | "buy", "find", "search for" a product | Ask deadline → buyer pipeline |
+The unified agent decides the type of each task. There is no separate router or classifier. The agent calls `save_task(type=...)` or `save_reminder(...)` based on its understanding of the message. Supported types:
+
+| Type | Typical intent | Post-save action (handler) |
+|------|---------------|---------------------------|
+| `reminder` | "remind me", date/time reference | PATCH /reminder; ask for missing date or time |
+| `shopping` | Buy/find a product | Ask deadline → run_buyer pipeline |
 | `idea` | Startup / product concept | Queue for nightly discovery |
-| `todo` | Actionable verb, no specific time | Save + emoji reply |
-| `architecture` | Technical design decision | Save + GitHub issue |
-| `learning` | Lesson learned, insight | Save + GitHub issue |
-| `question` | Open question to think through | Save + emoji reply |
-| `note` | Anything else — link, fact, reference | Save + emoji reply (default) |
-| `query` | "show me", "list", "what X do I have", "найди", "покажи" | Query agent fetches + replies; **no task saved** |
+| `todo` | Actionable verb, no specific time | Emoji reply |
+| `architecture` | Technical design decision | Save to GitHub issue |
+| `learning` | Lesson learned, insight | Save to GitHub issue |
+| `question` | Open question to think through | Emoji reply |
+| `note` | Link, fact, reference, anything else | Emoji reply (default) |
+| `query` | "show me", "list", "what X do I have" | Agent uses `list_tasks`/`search_tasks` tools and replies; task still saved |
+
+> Note: unlike the old flow, `query` messages are now saved as tasks. The agent uses read tools to build the reply before calling `save_task`.
 
 ---
 
@@ -173,7 +174,7 @@ CREATE TABLE settings (
 All memory is stored in Neo4j as a knowledge graph of entities and relationships extracted from conversations.
 
 ### Tier 1 — Per exchange (immediate)
-**Trigger:** After every bot reply (called directly from `_classify_and_followup`)
+**Trigger:** After every bot reply (called from the unified agent handler in `bot/handlers/idea.py`, and from all AWAITING handlers)
 **What:** `POST /memory/process-now` → fetch `messages` WHERE `processed=0` → `extract_graph()` → merge nodes/edges into Neo4j → mark messages processed
 **Extracts:** Explicit facts only: people mentioned, preferences stated, events referenced
 
@@ -232,39 +233,53 @@ Uses `with_structured_output(_ClassifyOutput)` — typed Pydantic model, no JSON
 
 ---
 
-## Task agent (`agent/task_agent.py`)
+## Unified agent (`agent/unified_agent.py`)
 
-A full tool-calling agent loop that serves as the more capable alternative to `classify_task`. Not yet wired into the main message handler — currently used via CLI (`python agent/task_agent.py "task text"`).
+The single entry point for all fresh user messages. Replaces `classifier.py`, `_classify_and_followup`, and `query_agent.run_query`.
 
-### Tools available to the LLM
-| Tool | Description |
-|------|-------------|
-| `save_reminder` | Create task + set due_date + due_time |
-| `save_task` | Create task of any non-reminder type |
-| `ask_clarification` | Ask user a specific question (for missing date/time) |
-| `query_memory` | MCP: search knowledge graph (if `MEMORY_AGENT_URL` set) |
-| `save_memory` | MCP: store new long-term fact |
-| `list_entities` | MCP: browse knowledge graph |
+**Purpose:** One tool-calling loop that reads context, decides what to save, saves it, and composes a reply — all in a single agent run.
 
-The agent loops up to 8 rounds: calls MCP tools for context, then calls exactly one task tool.
+**System prompt includes:** today's date, user timezone, discovery schedule, last 20 messages as conversation history.
 
-**Redesign opportunity:** `task_agent.process_task()` could replace `classify_task()` in the main message handler for richer, memory-aware task processing.
+**MCP connection:** opened once at the start of each run (if `MEMORY_AGENT_URL` is set), shared across all rounds, closed on exit.
 
----
-
-## Query agent (`agent/query_agent.py`)
-
-A read-only tool-calling agent that answers questions about saved tasks. Triggered from `_handle_query` in `bot/handlers/idea.py` when the pre-check regex `_QUERY_RE` matches and inline classification confirms `type=query`. The agent **never creates or modifies tasks**.
+**Loop limit:** 10 rounds maximum.
 
 ### Tools available to the LLM
 | Tool | Description |
 |------|-------------|
 | `list_tasks(type, status, limit)` | `GET /tasks` filtered by type and/or status |
 | `search_tasks(query, limit)` | `GET /tasks/search?q=` — LIKE keyword match on task text |
-| `query_memory` | MCP: keyword search in Neo4j (if `MEMORY_AGENT_URL` set) |
-| `list_entities` | MCP: browse the knowledge graph (if `MEMORY_AGENT_URL` set) |
+| `save_reminder(text, title, due_date, due_time)` | `POST /tasks type=reminder` + `PATCH /reminder`; date+time in user's local timezone; sets AWAITING state if missing |
+| `save_task(text, title, type)` | `POST /tasks` for any non-reminder type |
+| `ask_clarification(question)` | Returns the question as the agent's reply (terminal tool — ends the loop) |
+| `query_memory(query)` | MCP: keyword search in Neo4j |
+| `save_memory(fact)` | MCP: persist a new long-term fact |
+| `list_entities(entity_type?)` | MCP: browse the knowledge graph |
 
-The agent loops up to 6 rounds, calling whichever tools the LLM selects, then formats a reply string. `_handle_query` sends this reply to the user, saves the bot message, and triggers Tier 1 extraction — identical to the normal post-reply flow.
+**Return value:** `AgentResult(reply, task_id, task_type, awaiting)`
+- `reply` — text to send to Telegram
+- `task_id` — ID of the saved task (if any)
+- `task_type` — type string used for post-save routing in the handler
+- `awaiting` — dict of `settings` keys to set (for partial reminders)
+
+### Legacy agents (kept for reference)
+- `agent/classifier.py` — structured-output classifier; no longer called from the main handler
+- `agent/task_agent.py` — earlier task-only tool-calling agent; superseded
+- `agent/query_agent.py` — earlier read-only query agent; superseded
+
+---
+
+## Classification — memory injection (legacy reference)
+
+`agent/classifier.py:classify_task()` (no longer active in the main flow) received two memory contexts:
+
+```
+short_term: last 20 messages from messages table
+long_term:  Neo4j context string from query_memory(text)
+```
+
+In the unified agent, both contexts are injected into the system prompt in the same way — recent messages as conversation history, Neo4j results via the `query_memory` tool call during the loop.
 
 ---
 

@@ -58,7 +58,7 @@ idea-bot/
 │
 ├── bot/
 │   ├── handlers/
-│   │   ├── idea.py             # MessageHandler: save → classify+memory → route
+│   │   ├── idea.py             # MessageHandler: save → typing → run_unified_agent → reply + awaiting state
 │   │   └── commands.py         # /list /report /status /debug_run /location /sethome /setlocation /timezone /settimezone /reminders
 │   ├── jobs/
 │   │   ├── discovery.py        # nightly: pending ideas → discovery pipeline → notify
@@ -70,9 +70,10 @@ idea-bot/
 │       └── github.py           # save architecture/learning tasks as GitHub issues
 │
 ├── agent/
-│   ├── classifier.py           # structured-output LLM classifier; injects short + long-term memory
-│   ├── task_agent.py           # tool-calling agent: save_reminder/save_task/ask_clarification + MCP memory
-│   ├── query_agent.py          # read-only tool-calling agent for retrieval queries; never saves tasks
+│   ├── unified_agent.py        # single tool-calling agent that handles ALL fresh messages; replaces classifier + query routing
+│   ├── classifier.py           # legacy — structured-output LLM classifier; kept for reference
+│   ├── task_agent.py           # legacy — task-only tool-calling agent; kept for reference
+│   ├── query_agent.py          # legacy — read-only query agent; kept for reference
 │   ├── time_parser.py          # regex-based HH:MM parser (no LLM needed)
 │   ├── deadline.py             # LLM date parser → DeadlineInfo (for shopping deadlines)
 │   ├── graph.py                # LangGraph discovery pipeline
@@ -134,7 +135,7 @@ idea-bot/
 
 | Command / Input | Behaviour |
 |----------------|-----------|
-| Any free text | Saved instantly, classified with memory context, routed by type |
+| Any free text | Saved by unified agent; agent queries/saves and replies in one tool-calling loop |
 | `/list` | Last 10 tasks with status + type emoji |
 | `/report <id>` | Full discovery report: score, verdict, market size, competitors |
 | `/status` | Task counts by status + next discovery run time |
@@ -153,12 +154,12 @@ idea-bot/
 - **All bot DB access via `db/client.py`** — HTTP client to data-api. Never import from `data-api/` in bot code.
 - **`db/database.py` is dead code** — old direct-SQLite layer from before the data-api existed. Do not use.
 - **All async** — `httpx.AsyncClient`, `asyncio`. Never `requests` or `time.sleep`.
-- **Instant reply, async classify** — `handle_message` saves the task and replies in ~50ms. Classification + memory query run in `asyncio.create_task`.
-- **Both messages and bot replies are saved** — every user message and every bot reply is written to the `messages` table via `save_message()`. This feeds the memory extraction pipeline. This now includes bot replies from all reminder clarification handlers (`_handle_reminder_date_reply`, `_handle_reminder_time_reply`) and the shopping deadline handler (`_handle_deadline_reply`) — previously these handlers replied but never saved to the messages table or triggered Tier 1 extraction (bug fixed).
+- **Unified agent handles all fresh messages** — `agent/unified_agent.py` runs a tool-calling loop (up to 10 rounds) that decides whether to save, query, or ask for clarification. It replaces the old classify→route flow (`classifier.py`, `_classify_and_followup`, `query_agent.run_query`). Every message is saved by the agent — either via `save_reminder` or `save_task`.
+- **Message flow** — `handle_message` saves the user message and checks AWAITING state first. If no AWAITING key is set, it sends a `typing` action, fetches the last 20 messages, and calls `run_unified_agent(text, recent, user_tz)`. The agent returns `AgentResult(reply, task_id, task_type, awaiting)`; the handler then replies, saves the bot message, triggers Tier 1 extraction, and sets any new AWAITING keys.
+- **Both messages and bot replies are saved** — every user message and every bot reply is written to the `messages` table via `save_message()`. This feeds the memory extraction pipeline. This includes bot replies from all reminder clarification handlers (`_handle_reminder_date_reply`, `_handle_reminder_time_reply`) and the shopping deadline handler (`_handle_deadline_reply`).
 - **Single-user guard** — every handler checks `update.effective_user.id == settings.telegram_user_id`.
 - **Jobs via PTB job_queue** — `run_daily` / `run_repeating` registered in `main.py`. No system cron.
-- **Memory agent is optional** — if `MEMORY_AGENT_URL` is empty, the bot works without long-term memory; short-term context (last 20 messages) still flows into classification.
-- **Query routing bypasses task creation** — `handle_message` applies `_QUERY_RE` (regex) before the normal save path. If it matches and no AWAITING state is active, the message is classified inline; if the type is `query`, `_handle_query` runs the query agent and returns immediately — no task row is created, no `create_task` call is made. The `query` type is also handled as a fallback in `_classify_and_followup` in case the regex misses it.
+- **Memory agent is optional** — if `MEMORY_AGENT_URL` is empty, the bot works without long-term memory; the unified agent opens the MCP connection once per run when the URL is set, and short-term context (last 20 messages) is always included in the system prompt.
 
 ---
 
@@ -197,9 +198,9 @@ python -m pytest tests/test_db.py -v          # db/client HTTP layer
 
 ## Adding a new task type
 
-1. Add to `TASK_TYPES` dict in `agent/classifier.py`
-2. Add routing branch in `_classify_and_followup` in `bot/handlers/idea.py`
-3. Add emoji to `_TYPE_EMOJI` in the same file
+1. Add the type name to the unified agent's system prompt in `agent/unified_agent.py` so the LLM knows it can call `save_task(type=...)` with it
+2. Add emoji to `_TYPE_EMOJI` in `bot/handlers/idea.py`
+3. Add any post-save behaviour in the `AgentResult` handler block in `bot/handlers/idea.py` (e.g. GitHub, buyer pipeline)
 4. If it needs a new job: add to `bot/jobs/`, register in `main.py`
 5. If it needs new DB columns: add `ALTER TABLE` migration in `data-api/database.py:init_db()`
 

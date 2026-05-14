@@ -23,58 +23,27 @@ graph TB
 ```mermaid
 flowchart TD
     A([User sends text]) --> B[handle_message]
+    B --> C[save_message user async\nset last_user_message_at async]
+    C --> D{AWAITING state?}
+    D -->|awaiting_reminder_*| E[_handle_reminder_date_reply\nor _handle_reminder_time_reply\n→ save + Tier 1]
+    D -->|awaiting_task_id| F[_handle_deadline_reply\n→ run_buyer + save + Tier 1]
+    D -->|none| G[send typing action\nget_recent_messages 20]
+    G --> H[run_unified_agent\ntext + recent + user_tz]
 
-    B --> C{AWAITING state\nin settings?}
-    C -->|awaiting_reminder_task_id| D[_handle_reminder_date_reply\nor _handle_reminder_time_reply\n→ save_message + process-now]
-    C -->|awaiting_task_id| E[_handle_deadline_reply\n→ run_buyer\n→ save_message + process-now]
-    C -->|nothing| F
-
-    F[save_message user + text\nset last_user_message_at] --> QR
-
-    QR{_QUERY_RE\nregex matches?}
-    QR -->|yes| QC[classify inline]
-    QC -->|type=query| QH[_handle_query\n→ query_agent.run_query\n→ reply + save_message\n+ process-now / Tier 1]
-    QC -->|other type| G
-    QR -->|no| G
-
-    G[create_task type=note\n→ reply 'Task #N saved ✓'\nsave_message bot + reply] --> H
-
-    H[asyncio.create_task\n_classify_and_followup] -->|background| I
-
-    subgraph CLASSIFY [Classification — runs in background]
-        I[get_recent_messages 20\nshort-term context] --> J
-        J{MEMORY_AGENT_URL set?}
-        J -->|yes| K[MCP query_memory text\n→ Neo4j keyword search\n→ formatted context string]
-        J -->|no| L[no long-term context]
-        K --> M
-        L --> M
-        M[classify_task\nwith_structured_output\ngemini-3.1-flash-lite\ninjects both contexts] --> N[set_task_type]
+    subgraph AGENT [Unified agent — up to 10 rounds]
+        H --> I{LLM decides\nnext tool}
+        I -->|query_memory| J[Neo4j search\nvia MCP]
+        I -->|list_tasks| K[GET /tasks\nfiltered]
+        I -->|search_tasks| L[GET /tasks/search\nkeyword]
+        I -->|save_reminder| M[POST /tasks type=reminder\nPATCH /reminder\nset AWAITING if partial]
+        I -->|save_task| N[POST /tasks\nany type]
+        I -->|ask_clarification| O[return question\nas reply]
+        J & K & L --> I
+        M & N & O --> P[LLM writes\nfinal reply]
     end
 
-    N --> R{type?}
-
-    R -->|idea| S[queue: nightly discovery\nreply with time]
-    R -->|shopping| T[ask deadline\nset AWAITING_TASK_KEY]
-    R -->|reminder| U{due_date\n+due_time\nextracted?}
-    U -->|both| V[update_task_reminder\nreply confirmed]
-    U -->|partial| W[set AWAITING_REMINDER_TASK_KEY\nask for missing piece]
-    U -->|neither| W
-    R -->|architecture\nlearning| X[save_to_github\nreply with link]
-    R -->|todo note\nquestion other| Y[emoji reply]
-    R -->|query\nfallback| QF[_handle_query\n→ query_agent.run_query\n→ reply]
-
-    D --> Z
-    E --> Z
-    QH --> ZEND([done — early exit\nno task created])
-    S --> Z
-    T --> Z
-    V --> Z
-    W --> Z
-    X --> Z
-    Y --> Z
-    QF --> Z
-
-    Z[save_message bot + reply\nPOST /memory/process-now\n→ Tier 1 extraction]
+    P --> Q[AgentResult\nreply + task_id + task_type + awaiting]
+    Q --> R[reply_text to Telegram\nsave_message bot + Tier 1\nset awaiting settings\nGitHub if arch/learning]
 ```
 
 ---
@@ -260,7 +229,7 @@ Event-driven (not scheduled):
 flowchart LR
     subgraph BOT [idea-bot process]
         HM[handle_message] --> DC[db/client.py]
-        CL[classifier.py] -->|MCP| MA
+        UA[unified_agent.py] -->|MCP| MA
         TJ[jobs/memory.py] -->|HTTP| MA
         RJ[jobs/reminders.py] --> DC
         NJ[jobs/notifier.py] --> DC
@@ -283,7 +252,11 @@ flowchart LR
 
 ---
 
-## 10. Query agent flow
+## 10. Query agent flow (superseded)
+
+> **This flow is no longer active.** Query handling is now done inside the unified agent loop (see Diagram 2). `agent/query_agent.py` and `_handle_query` are kept for reference but are not called from `bot/handlers/idea.py`.
+>
+> In the new flow, when the LLM determines a message is a query it calls `list_tasks` and/or `search_tasks` within the unified agent loop, then calls `save_task(type="query")` to record it, and returns a formatted reply — all in one run.
 
 ```mermaid
 flowchart TD
