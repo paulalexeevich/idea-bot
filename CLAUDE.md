@@ -15,6 +15,22 @@ This repo is part of the **ToDo** personal productivity system. All repositories
 
 ---
 
+## Live infrastructure
+
+| Item | Value |
+|------|-------|
+| **VPS** | Hetzner — `204.168.187.216` |
+| **SSH alias** | `hetzner` (configured in `~/.ssh/config`) |
+| **Code path on VPS** | `/opt/agents/idea-bot/` |
+| **Compose project** | `idea-bot` — 5 containers (see docker-compose.yml) |
+| **Deployment** | Direct: `rsync` source → VPS, then `docker compose up --build -d` |
+| **No CI/CD** | No GitHub Actions, no automated pipelines. All deploys are manual. |
+
+To check running services: `ssh hetzner "docker compose -f /opt/agents/idea-bot/docker-compose.yml ps"`
+
+To tail live logs: `ssh hetzner "docker logs idea-bot-idea-bot-1 -f"`
+
+---
 
 A personal Telegram bot that classifies messages, manages tasks/reminders, validates startup ideas, finds products to buy, and builds a long-term knowledge graph of the user from their conversations.
 
@@ -206,12 +222,21 @@ python -m pytest tests/test_db.py -v          # db/client HTTP layer
 
 ## Deploying to VPS
 
+**No CI/CD. All deploys are manual rsync + docker.**
+
 ```bash
-# Sync source (never overwrite .env or data/)
-rsync -av --exclude='.git/' --exclude='data/' --exclude='.env' \
+# 1. Sync source to VPS (never overwrites .env or data/)
+rsync -avz \
+  --exclude='.git/' --exclude='data/' --exclude='.env' \
   --exclude='.venv/' --exclude='__pycache__/' --exclude='*.egg-info/' \
   /Users/pavelp/idea-bot/ hetzner:/opt/agents/idea-bot/
 
-# Rebuild and restart changed services
-ssh hetzner "cd /opt/agents/idea-bot && docker compose up -d --build idea-bot data-api"
+# 2. Rebuild and restart affected services
+ssh hetzner "cd /opt/agents/idea-bot && docker compose up --build -d idea-bot data-api"
+
+# 3. Verify
+ssh hetzner "docker compose -f /opt/agents/idea-bot/docker-compose.yml ps"
+ssh hetzner "docker logs idea-bot-idea-bot-1 --tail 20"
 ```
+
+After a code change, always rsync then rebuild. The `.env` and `data/` volume are never touched by rsync — they persist across deploys.
